@@ -19,7 +19,10 @@ except ImportError:
 Magic = "\xff\x6d\x66\xfd"
 BFMagic = "\xff\x6d\x68\xfd"
 
-jitdriver = JitDriver(greens=['pc', 'program'], reds=['tape'])
+def get_location(pc, program):
+    return "%s_%s_%s" % (hex(pc), hex(ord(program[pc]) >> 4), hex(ord(program[pc]) & 0xf))
+
+jitdriver = JitDriver(greens=['pc', 'program'], reds=['tape'], get_printable_location=get_location)
 
 def mainloop(program):
     pc = 8
@@ -79,15 +82,15 @@ def mainloop(program):
                     tape.advance(data)
                 elif spb == 3:
                     tape.devance(data)
-                elif spb == 4 and tape.get() & 0xff == 0:
+                elif spb == 4 and tape.get() == 0:
                     pc = data
-                elif spb == 5 and tape.get() & 0xff != 0:
+                elif spb == 5 and tape.get() != 0:
                     pc = data
     return 0
 
 class Tape(object):
     def __init__(self, size):
-        self.thetape = [0] * size
+        self.thetape = bytearray(b'\x00' * size)
         self.position = 0
 
     def get(self):
@@ -117,7 +120,6 @@ class Tape(object):
         elif code == 7:
             # read from stdin
             self.set(ord(os.read(0,1)[0]))
-
 
 def entry_point(argv):
     try:
