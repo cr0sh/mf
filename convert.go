@@ -50,7 +50,6 @@ package mf
 
 import (
 	"bytes"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"strings"
@@ -72,6 +71,7 @@ const bf = "+-><[].,"
 // and write to wrapping Writer interface.
 type ToBF struct {
 	wr      io.Writer
+	bfmode  bool
 	rdSize  uint32
 	misc    [4]byte // magic, memsize storage
 	memSize uint32  // at least 32-bit
@@ -88,46 +88,64 @@ func NewBFWriter(wr io.Writer) *ToBF {
 // Write implements io.Writer interface.
 // Write will write converted BF code from p to wr.
 func (r *ToBF) Write(p []byte) (n int, err error) {
-	for i, b := range p {
+	for i := 0; i < len(p); i++ {
+		b := p[i]
 		switch {
 		case r.rdSize <= 4:
 			if r.rdSize != 4 {
 				r.misc[r.rdSize] = b
+			} else if string(r.misc[:4]) == BFMagic {
+				r.bfmode = true
+				r.misc[r.rdSize-4] = b
 			} else if string(r.misc[:4]) != Magic {
 				return i, fmt.Errorf("Invalid magic 0x%x", r.misc[:4])
+				r.misc[r.rdSize-4] = b
 			}
 		case r.rdSize <= 8:
 			if r.rdSize != 8 {
 				r.misc[r.rdSize-4] = b
 			} else {
 				r.wr.Write([]byte("MinFuck compiled code\n"))
-				r.allocMem(r.miscData())
+				if !r.bfmode {
+					fmt.Println("Memory alloc size:", r.miscData())
+					r.allocMem(r.miscData())
+				}
+				if err := r.processWrapper(b, &i); err != nil {
+					return i, err
+				}
 			}
-		case r.rdSize <= r.rdGoal:
-			r.misc[(r.rdSize+3)-r.rdGoal] = b
-			if r.rdSize == r.rdGoal {
+		case r.rdSize < r.rdGoal:
+			r.misc[(r.rdSize+4)-r.rdGoal] = b
+			if r.rdSize == r.rdGoal-1 {
 				for i := r.miscData(); i > 0; i-- {
 					r.wr.Write([]byte(bf[r.scode : r.scode+1]))
 				}
 			}
 		default:
-			if err := r.processByte(b); err != nil {
+			if err := r.processWrapper(b, &i); err != nil {
 				return i, err
-			}
-			if r.sbit { // special bit
-				switch {
-				case r.scode < 4: // compressed code
-					r.rdGoal = r.rdSize + 4
-				case r.scode == 4 || r.scode == 5:
-					r.wr.Write([]byte(bf[r.scode : r.scode+1]))
-				case r.scode == 6:
-					r.sbit = false // no-op
-				}
 			}
 		}
 		r.rdSize++
 	}
-	return
+	return len(p), nil
+}
+
+func (r *ToBF) processWrapper(b byte, i *int) error {
+	if err := r.processByte(b); err != nil {
+		return err
+	}
+	if r.sbit { // special bit
+		switch {
+		case r.scode < 4: // compressed code
+			r.rdGoal = r.rdSize + 5
+		case r.scode == 4 || r.scode == 5:
+			r.wr.Write([]byte(bf[r.scode : r.scode+1]))
+			(*i) += 4
+		}
+		r.sbit = false
+	}
+	return nil
 }
 
 func (r *ToBF) processByte(b byte) error {
@@ -274,8 +292,10 @@ func (r *FromBF) Close() error {
 	if r.dup > 0 {
 		r.clearDup()
 	}
+	if r.half {
+		r.writeNibble(8 | 6)
+	}
 	r.cacheJumpOff()
-	io.Copy(r.wrap, r.wr)
 	return nil
 }
 
@@ -283,22 +303,20 @@ func (r *FromBF) cacheJumpOff() {
 	s := new(stack)
 	s.mem = make([]uint32, 1024)
 	buf := r.wr.Bytes()
-	fmt.Print(hex.Dump(buf))
 	for i := 8; i < len(buf); i++ {
 		b := buf[i]
 		n1, n2 := b>>4, b&0xf
 		if n1 == 0xc || n2 == 0xc {
 			s.put(uint32(i))
-			i += 4
 		} else if n1 == 0xd || n2 == 0xd {
 			jmp := s.get()
-			fmt.Printf("Loop index pair %2x %2x\n", jmp, i)
 			copy(buf[i+1:i+5], uint32bytes(jmp+5))
 			copy(buf[jmp+1:jmp+5], uint32bytes(uint32(i)+5))
+		}
+		if n1&8 == 8 || n2&8 == 8 {
 			i += 4
 		}
 	}
-	fmt.Print(hex.Dump(buf))
 	r.wrap.Write(buf)
 }
 
