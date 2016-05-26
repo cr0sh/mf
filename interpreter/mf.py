@@ -8,31 +8,23 @@ import os
 import sys
 import binascii
 
-try:
-    from rpython.rlib.jit import JitDriver
-except ImportError:
-    class JitDriver(object):
-        def __init__(self,**kw): pass
-        def jit_merge_point(self,**kw): pass
-        def can_enter_jit(self,**kw): pass
+from rpython.rlib.jit import JitDriver
+from rpython.rlib.rstruct.runpack import runpack
 
 Magic = "\xff\x6d\x66\xfd"
 BFMagic = "\xff\x6d\x68\xfd"
 
-def get_location(pc, program):
-    return "%s_%s_%s" % (hex(pc), hex(ord(program[pc]) >> 4), hex(ord(program[pc]) & 0xf))
-
-jitdriver = JitDriver(greens=['pc', 'program'], reds=['tape'], get_printable_location=get_location)
+jitdriver = JitDriver(greens=['pc', 'program'], reds=['tape'])
 
 def mainloop(program):
-    pc = 8
+    pc = 8 & 0xFFFFFFFFL
     tape = None
     
     if len(program) < 8:
         os.write(1, "Invalid MF binary(file too small)\n")
         return 1
 
-    memsize = ord(program[4]) << 24 | ord(program[5]) << 16 | ord(program[6]) << 8 | ord(program[7])
+    memsize = runpack(">I", program[4:8])
     magic = program[:4]
     if magic == Magic:
         tape = Tape(2*memsize+8)
@@ -69,23 +61,27 @@ def mainloop(program):
 
         else:
             pc += 1
-            m = program[pc:pc+4]
-            pc += 4
             # print "special: ", spb, data
             if spb == 0:
-                tape.inc(ord(m[3]))
+                tape.inc(ord(program[pc+3]))
+                pc += 4
             elif spb == 1:
-                tape.dec(ord(m[3]))
+                tape.dec(ord(program[pc+3]))
+                pc += 4
             else:
-                data = abs(ord(m[0])<<24|ord(m[1])<<16|ord(m[2])<<8|ord(m[3]))
+                data = runpack(">I", program[pc:pc+4])
+                pc += 4
+                assert data > 0
                 if spb == 2:
                     tape.advance(data)
                 elif spb == 3:
                     tape.devance(data)
                 elif spb == 4 and tape.get() == 0:
-                    pc = data
+                    pc = data & 0xFFFFFFFFL
+                    jitdriver.can_enter_jit(pc=pc, program=program, tape=tape)
                 elif spb == 5 and tape.get() != 0:
-                    pc = data
+                    pc = data & 0xFFFFFFFFL
+                    jitdriver.can_enter_jit(pc=pc, program=program, tape=tape)
     return 0
 
 class Tape(object):
